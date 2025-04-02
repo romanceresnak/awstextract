@@ -1,0 +1,236 @@
+# Základný Docker obraz
+image: alpine:latest
+
+# Definícia fáz pipeline
+stages:
+  - validate
+  - plan
+  - apply
+  - test
+  - destroy
+
+# Globálne premenné
+variables:
+  TERRAFORM_VERSION: "1.6.0"
+
+# Spoločná šablóna pre inštaláciu Terraform
+.terraform_installation:
+  before_script:
+    - apk add --no-cache curl unzip git
+    - cd /tmp
+    - curl -O https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip
+    - unzip terraform_${TERRAFORM_VERSION}_linux_amd64.zip
+    - mv terraform /usr/local/bin/
+    - cd $CI_PROJECT_DIR
+    - terraform --version
+
+# Šablóny pre prostredia
+.dev_env: &dev_environment
+  variables:
+    TF_VAR_environment: "dev"
+    TF_VAR_client_id: "${ARM_CLIENT_ID}"
+    TF_VAR_client_secret: "${ARM_CLIENT_SECRET}"
+    TF_VAR_subscription_id: "${ARM_SUBSCRIPTION_ID}"
+    TF_VAR_tenant_id: "${ARM_TENANT_ID}"
+    TF_CLI_ARGS_init: "-backend-config=key=dev.terraform.tfstate"
+  
+.staging_env: &staging_environment
+  variables:
+    TF_VAR_environment: "staging"
+    TF_VAR_client_id: "${ARM_CLIENT_ID}"
+    TF_VAR_client_secret: "${ARM_CLIENT_SECRET}"
+    TF_VAR_subscription_id: "${ARM_SUBSCRIPTION_ID}"
+    TF_VAR_tenant_id: "${ARM_TENANT_ID}"
+    TF_CLI_ARGS_init: "-backend-config=key=staging.terraform.tfstate"
+
+.prod_env: &prod_environment
+  variables:
+    TF_VAR_environment: "prod"
+    TF_VAR_client_id: "${ARM_CLIENT_ID}"
+    TF_VAR_client_secret: "${ARM_CLIENT_SECRET}"
+    TF_VAR_subscription_id: "${ARM_SUBSCRIPTION_ID}"
+    TF_VAR_tenant_id: "${ARM_TENANT_ID}"
+    TF_CLI_ARGS_init: "-backend-config=key=prod.terraform.tfstate"
+
+# Validácia - paralelne pre všetky prostredia
+validate:dev:
+  extends: .terraform_installation
+  <<: *dev_environment
+  stage: validate
+  script:
+    - cd environments/dev
+    - terraform init
+    - terraform validate
+
+validate:staging:
+  extends: .terraform_installation
+  <<: *staging_environment
+  stage: validate
+  script:
+    - cd environments/staging
+    - terraform init
+    - terraform validate
+
+validate:prod:
+  extends: .terraform_installation
+  <<: *prod_environment
+  stage: validate
+  script:
+    - cd environments/prod
+    - terraform init
+    - terraform validate
+
+# Plánovanie - paralelne pre všetky prostredia
+plan:dev:
+  extends: .terraform_installation
+  <<: *dev_environment
+  stage: plan
+  script:
+    - cd environments/dev
+    - terraform init
+    - terraform plan -out=tfplan
+  artifacts:
+    paths:
+      - environments/dev/tfplan
+    expire_in: 1 week
+  needs:
+    - validate:dev
+
+plan:staging:
+  extends: .terraform_installation
+  <<: *staging_environment
+  stage: plan
+  script:
+    - cd environments/staging
+    - terraform init
+    - terraform plan -out=tfplan
+  artifacts:
+    paths:
+      - environments/staging/tfplan
+    expire_in: 1 week
+  needs:
+    - validate:staging
+
+plan:prod:
+  extends: .terraform_installation
+  <<: *prod_environment
+  stage: plan
+  script:
+    - cd environments/prod
+    - terraform init
+    - terraform plan -out=tfplan
+  artifacts:
+    paths:
+      - environments/prod/tfplan
+    expire_in: 1 week
+  needs:
+    - validate:prod
+
+# Aplikovanie zmien - postupne, s manuálnym potvrdením
+apply:dev:
+  extends: .terraform_installation
+  <<: *dev_environment
+  stage: apply
+  script:
+    - cd environments/dev
+    - terraform init
+    - terraform apply -auto-approve tfplan
+  dependencies:
+    - plan:dev
+  when: manual
+  environment:
+    name: development
+    on_stop: destroy:dev
+
+apply:staging:
+  extends: .terraform_installation
+  <<: *staging_environment
+  stage: apply
+  script:
+    - cd environments/staging
+    - terraform init
+    - terraform apply -auto-approve tfplan
+  dependencies:
+    - plan:staging
+  needs:
+    - apply:dev  # Postupnosť: najprv dev, potom staging
+  when: manual
+  environment:
+    name: staging
+    on_stop: destroy:staging
+
+apply:prod:
+  extends: .terraform_installation
+  <<: *prod_environment
+  stage: apply
+  script:
+    - cd environments/prod
+    - terraform init
+    - terraform apply -auto-approve tfplan
+  dependencies:
+    - plan:prod
+  needs:
+    - apply:staging  # Postupnosť: najprv staging, potom prod
+  when: manual
+  environment:
+    name: production
+    on_stop: destroy:prod
+  only:
+    - main  # Produkcia len z main vetvy
+
+# Testovanie - paralelne
+test:dev:
+  stage: test
+  script:
+    - echo "Spúšťam testy na DEV prostredí..."
+    - sleep 5
+  needs:
+    - apply:dev
+
+test:staging:
+  stage: test
+  script:
+    - echo "Spúšťam testy na STAGING prostredí..."
+    - sleep 10
+  needs:
+    - apply:staging
+
+# Odstránenie zdrojov - manuálne pre každé prostredie
+destroy:dev:
+  extends: .terraform_installation
+  <<: *dev_environment
+  stage: destroy
+  script:
+    - cd environments/dev
+    - terraform init
+    - terraform destroy -auto-approve
+  when: manual
+  environment:
+    name: development
+    action: stop
+
+destroy:staging:
+  extends: .terraform_installation
+  <<: *staging_environment
+  stage: destroy
+  script:
+    - cd environments/staging
+    - terraform init
+    - terraform destroy -auto-approve
+  when: manual
+  environment:
+    name: staging
+    action: stop
+
+destroy:prod:
+  extends: .terraform_installation
+  <<: *prod_environment
+  stage: destroy
+  script:
+    - cd environments/prod
+    - terraform init
+    - terraform destroy -auto-approve
+  when: manual
+  environment:
+    name: production
+    action: stop
