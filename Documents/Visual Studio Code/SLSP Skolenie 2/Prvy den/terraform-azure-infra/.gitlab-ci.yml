@@ -1,0 +1,72 @@
+# Základný Docker obraz
+image: alpine:latest
+
+# Definícia postupnosti fáz pipeline
+stages:
+  - validate
+  - plan
+  - apply
+  - destroy
+
+# Globálne premenné
+variables:
+  TF_VAR_resource_group_name: "terraform-azure-infra-ci"
+  TF_VAR_location: "West Europe"
+  TF_VAR_environment: "dev"
+  TF_VAR_project_name: "terraform-azure-infra"
+  TF_VAR_address_space: '["10.0.0.0/16"]'
+  TERRAFORM_VERSION: "1.6.0"
+
+# Prípravná sekcia
+before_script:
+  # Inštalácia potrebných nástrojov
+  - apk add --no-cache curl unzip git
+  
+  # Stiahnutie a inštalácia Terraform
+  - cd /tmp
+  - curl -O https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip
+  - unzip terraform_${TERRAFORM_VERSION}_linux_amd64.zip
+  - mv terraform /usr/local/bin/
+  - cd $CI_PROJECT_DIR
+  
+  # Overenie inštalácie a inicializácia
+  - terraform --version
+  - terraform init
+
+# Fáza validácie
+validate:
+  stage: validate
+  script:
+    - terraform validate
+
+# Fáza plánovania
+plan:
+  stage: plan
+  script:
+    - terraform plan -out=tfplan
+  artifacts:
+    paths:
+      - tfplan
+    expire_in: 1 week
+
+# Fáza aplikovania
+apply:
+  stage: apply
+  script:
+    - terraform apply -auto-approve tfplan
+  dependencies:
+    - plan
+  when: manual
+  environment:
+    name: development
+    on_stop: destroy
+
+# Fáza odstránenia
+destroy:
+  stage: destroy
+  script:
+    - terraform destroy -auto-approve
+  when: manual
+  environment:
+    name: development
+    action: stop
